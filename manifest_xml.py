@@ -63,12 +63,14 @@ class _XmlRemote(object):
                alias=None,
                fetch=None,
                manifestUrl=None,
-               review=None):
+               review=None,
+               revision=None):
     self.name = name
     self.fetchUrl = fetch
     self.manifestUrl = manifestUrl
     self.remoteAlias = alias
     self.reviewUrl = review
+    self.revision = revision
     self.resolvedFetchUrl = self._resolveFetchUrl()
 
   def __eq__(self, other):
@@ -84,16 +86,20 @@ class _XmlRemote(object):
     # about here are:
     # * no scheme in the base url, like <hostname:port>
     # * persistent-https://
+    # * rpc://
     # We handle this by replacing these with obscure protocols
     # and then replacing them with the original when we are done.
     # gopher -> <none>
     # wais -> persistent-https
+    # nntp -> rpc
     if manifestUrl.find(':') != manifestUrl.find('/') - 1:
       manifestUrl = 'gopher://' + manifestUrl
     manifestUrl = re.sub(r'^persistent-https://', 'wais://', manifestUrl)
+    manifestUrl = re.sub(r'^rpc://', 'nntp://', manifestUrl)
     url = urllib.parse.urljoin(manifestUrl, url)
     url = re.sub(r'^gopher://', '', url)
     url = re.sub(r'^wais://', 'persistent-https://', url)
+    url = re.sub(r'^nntp://', 'rpc://', url)
     return url
 
   def ToRemoteSpec(self, projectName):
@@ -159,6 +165,11 @@ class XmlManifest(object):
       e.setAttribute('alias', r.remoteAlias)
     if r.reviewUrl is not None:
       e.setAttribute('review', r.reviewUrl)
+    if r.revision is not None:
+      e.setAttribute('revision', r.revision)
+
+  def _ParseGroups(self, groups):
+    return [x for x in re.split(r'[,\s]+', groups) if x]
 
   def Save(self, fd, peg_rev=False, peg_rev_upstream=True):
     """Write the current manifest out to the given file descriptor.
@@ -167,7 +178,7 @@ class XmlManifest(object):
 
     groups = mp.config.GetString('manifest.groups')
     if groups:
-      groups = [x for x in re.split(r'[,\s]+', groups) if x]
+      groups = self._ParseGroups(groups)
 
     doc = xml.dom.minidom.Document()
     root = doc.createElement('manifest')
@@ -240,7 +251,8 @@ class XmlManifest(object):
       if d.remote:
         remoteName = d.remote.remoteAlias or d.remote.name
       if not d.remote or p.remote.name != remoteName:
-        e.setAttribute('remote', p.remote.name)
+        remoteName = p.remote.name
+        e.setAttribute('remote', remoteName)
       if peg_rev:
         if self.IsMirror:
           value = p.bare_git.rev_parse(p.revisionExpr + '^0')
@@ -252,8 +264,12 @@ class XmlManifest(object):
           # isn't our value, and the if the default doesn't already have that
           # covered.
           e.setAttribute('upstream', p.revisionExpr)
-      elif not d.revisionExpr or p.revisionExpr != d.revisionExpr:
-        e.setAttribute('revision', p.revisionExpr)
+      else:
+        revision = self.remotes[remoteName].revision or d.revisionExpr
+        if not revision or revision != p.revisionExpr:
+          e.setAttribute('revision', p.revisionExpr)
+        if p.upstream and p.upstream != p.revisionExpr:
+          e.setAttribute('upstream', p.upstream)
 
       for c in p.copyfiles:
         ce = doc.createElement('copyfile')
@@ -310,7 +326,7 @@ class XmlManifest(object):
   @property
   def projects(self):
     self._Load()
-    return self._paths.values()
+    return list(self._paths.values())
 
   @property
   def remotes(self):
@@ -498,6 +514,23 @@ class XmlManifest(object):
       if node.nodeName == 'project':
         project = self._ParseProject(node)
         recursively_add_projects(project)
+      if node.nodeName == 'extend-project':
+        name = self._reqatt(node, 'name')
+
+        if name not in self._projects:
+          raise ManifestParseError('extend-project element specifies non-existent '
+                                   'project: %s' % name)
+
+        path = node.getAttribute('path')
+        groups = node.getAttribute('groups')
+        if groups:
+          groups = self._ParseGroups(groups)
+
+        for p in self._projects[name]:
+          if path and p.relpath != path:
+            continue
+          if groups:
+            p.groups.extend(groups)
       if node.nodeName == 'repo-hooks':
         # Get the name of the project and the (space-separated) list of enabled.
         repo_hooks_project = self._reqatt(node, 'in-project')
@@ -592,8 +625,11 @@ class XmlManifest(object):
     review = node.getAttribute('review')
     if review == '':
       review = None
+    revision = node.getAttribute('revision')
+    if revision == '':
+      revision = None
     manifestUrl = self.manifestProject.config.GetString('remote.origin.url')
-    return _XmlRemote(name, alias, fetch, manifestUrl, review)
+    return _XmlRemote(name, alias, fetch, manifestUrl, review, revision)
 
   def _ParseDefault(self, node):
     """
@@ -686,7 +722,7 @@ class XmlManifest(object):
       raise ManifestParseError("no remote for project %s within %s" %
             (name, self.manifestFile))
 
-    revisionExpr = node.getAttribute('revision')
+    revisionExpr = node.getAttribute('revision') or remote.revision
     if not revisionExpr:
       revisionExpr = self._default.revisionExpr
     if not revisionExpr:
@@ -735,7 +771,7 @@ class XmlManifest(object):
     groups = ''
     if node.hasAttribute('groups'):
       groups = node.getAttribute('groups')
-    groups = [x for x in re.split(r'[,\s]+', groups) if x]
+    groups = self._ParseGroups(groups)
 
     if parent is None:
       relpath, worktree, gitdir, objdir = self.GetProjectPaths(name, path)
@@ -872,10 +908,8 @@ class XmlManifest(object):
     fromProjects = self.paths
     toProjects = manifest.paths
 
-    fromKeys = fromProjects.keys()
-    fromKeys.sort()
-    toKeys = toProjects.keys()
-    toKeys.sort()
+    fromKeys = sorted(fromProjects.keys())
+    toKeys = sorted(toProjects.keys())
 
     diff = {'added': [], 'removed': [], 'changed': [], 'unreachable': []}
 

@@ -14,10 +14,10 @@
 # limitations under the License.
 
 from __future__ import print_function
+import json
 import netrc
 from optparse import SUPPRESS_HELP
 import os
-import pickle
 import re
 import shutil
 import socket
@@ -127,6 +127,9 @@ HTTP client or proxy configuration, but the Git binary works.
 
 The --fetch-submodules option enables fetching Git submodules
 of a project from server.
+
+The -c/--current-branch option can be used to only fetch objects that
+are on the branch specified by a project's revision.
 
 SSH Connections
 ---------------
@@ -558,7 +561,10 @@ later is required to fix a server side protocol bug.
             branch = branch[len(R_HEADS):]
 
           env = os.environ.copy()
-          if 'TARGET_PRODUCT' in env and 'TARGET_BUILD_VARIANT' in env:
+          if 'SYNC_TARGET' in env:
+            target = env['SYNC_TARGET']
+            [success, manifest_str] = server.GetApprovedManifest(branch, target)
+          elif 'TARGET_PRODUCT' in env and 'TARGET_BUILD_VARIANT' in env:
             target = '%s-%s' % (env['TARGET_PRODUCT'],
                                 env['TARGET_BUILD_VARIANT'])
             [success, manifest_str] = server.GetApprovedManifest(branch, target)
@@ -760,7 +766,7 @@ class _FetchTimes(object):
   _ALPHA = 0.5
 
   def __init__(self, manifest):
-    self._path = os.path.join(manifest.repodir, '.repopickle_fetchtimes')
+    self._path = os.path.join(manifest.repodir, '.repo_fetchtimes.json')
     self._times = None
     self._seen = set()
 
@@ -779,22 +785,17 @@ class _FetchTimes(object):
   def _Load(self):
     if self._times is None:
       try:
-        f = open(self._path, 'rb')
-      except IOError:
-        self._times = {}
-        return self._times
-      try:
+        f = open(self._path)
         try:
-          self._times = pickle.load(f)
-        except IOError:
-          try:
-            os.remove(self._path)
-          except OSError:
-            pass
-          self._times = {}
-      finally:
-        f.close()
-    return self._times
+          self._times = json.load(f)
+        finally:
+          f.close()
+      except (IOError, ValueError):
+        try:
+          os.remove(self._path)
+        except OSError:
+          pass
+        self._times = {}
 
   def Save(self):
     if self._times is None:
@@ -808,13 +809,13 @@ class _FetchTimes(object):
       del self._times[name]
 
     try:
-      f = open(self._path, 'wb')
+      f = open(self._path, 'w')
       try:
-        pickle.dump(self._times, f)
-      except (IOError, OSError, pickle.PickleError):
-        try:
-          os.remove(self._path)
-        except OSError:
-          pass
-    finally:
-      f.close()
+        json.dump(self._times, f, indent=2)
+      finally:
+        f.close()
+    except (IOError, TypeError):
+      try:
+        os.remove(self._path)
+      except OSError:
+        pass

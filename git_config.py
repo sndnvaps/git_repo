@@ -15,8 +15,8 @@
 
 from __future__ import print_function
 
+import json
 import os
-import pickle
 import re
 import subprocess
 import sys
@@ -80,7 +80,7 @@ class GitConfig(object):
     return cls(configfile = os.path.join(gitdir, 'config'),
                defaults = defaults)
 
-  def __init__(self, configfile, defaults=None, pickleFile=None):
+  def __init__(self, configfile, defaults=None, jsonFile=None):
     self.file = configfile
     self.defaults = defaults
     self._cache_dict = None
@@ -88,12 +88,11 @@ class GitConfig(object):
     self._remotes = {}
     self._branches = {}
 
-    if pickleFile is None:
-      self._pickle = os.path.join(
+    self._json = jsonFile
+    if self._json is None:
+      self._json = os.path.join(
         os.path.dirname(self.file),
-        '.repopickle_' + os.path.basename(self.file))
-    else:
-      self._pickle = pickleFile
+        '.repo_' + os.path.basename(self.file) + '.json')
 
   def Has(self, name, include_defaults = True):
     """Return true if this configuration file has the key.
@@ -217,9 +216,9 @@ class GitConfig(object):
     """Resolve any url.*.insteadof references.
     """
     for new_url in self.GetSubSections('url'):
-      old_url = self.GetString('url.%s.insteadof' % new_url)
-      if old_url is not None and url.startswith(old_url):
-        return new_url + url[len(old_url):]
+      for old_url in self.GetString('url.%s.insteadof' % new_url, True):
+        if old_url is not None and url.startswith(old_url):
+          return new_url + url[len(old_url):]
     return url
 
   @property
@@ -248,50 +247,41 @@ class GitConfig(object):
     return self._cache_dict
 
   def _Read(self):
-    d = self._ReadPickle()
+    d = self._ReadJson()
     if d is None:
       d = self._ReadGit()
-      self._SavePickle(d)
+      self._SaveJson(d)
     return d
 
-  def _ReadPickle(self):
+  def _ReadJson(self):
     try:
-      if os.path.getmtime(self._pickle) \
+      if os.path.getmtime(self._json) \
       <= os.path.getmtime(self.file):
-        os.remove(self._pickle)
+        os.remove(self._json)
         return None
     except OSError:
       return None
     try:
-      Trace(': unpickle %s', self.file)
-      fd = open(self._pickle, 'rb')
+      Trace(': parsing %s', self.file)
+      fd = open(self._json)
       try:
-        return pickle.load(fd)
+        return json.load(fd)
       finally:
         fd.close()
-    except EOFError:
-      os.remove(self._pickle)
-      return None
-    except IOError:
-      os.remove(self._pickle)
-      return None
-    except pickle.PickleError:
-      os.remove(self._pickle)
+    except (IOError, ValueError):
+      os.remove(self._json)
       return None
 
-  def _SavePickle(self, cache):
+  def _SaveJson(self, cache):
     try:
-      fd = open(self._pickle, 'wb')
+      fd = open(self._json, 'w')
       try:
-        pickle.dump(cache, fd, pickle.HIGHEST_PROTOCOL)
+        json.dump(cache, fd, indent=2)
       finally:
         fd.close()
-    except IOError:
-      if os.path.exists(self._pickle):
-        os.remove(self._pickle)
-    except pickle.PickleError:
-      if os.path.exists(self._pickle):
-        os.remove(self._pickle)
+    except (IOError, TypeError):
+      if os.path.exists(self.json):
+        os.remove(self._json)
 
   def _ReadGit(self):
     """
@@ -576,6 +566,8 @@ class Remote(object):
         return None
 
       u = self.review
+      if u.startswith('persistent-'):
+        u = u[len('persistent-'):]
       if u.split(':')[0] not in ('http', 'https', 'sso'):
         u = 'http://%s' % u
       if u.endswith('/Gerrit'):
@@ -629,8 +621,6 @@ class Remote(object):
     """
     if IsId(rev):
       return rev
-    if rev.startswith(R_TAGS):
-      return rev
 
     if not rev.startswith('refs/'):
       rev = R_HEADS + rev
@@ -638,6 +628,10 @@ class Remote(object):
     for spec in self.fetch:
       if spec.SourceMatches(rev):
         return spec.MapSource(rev)
+
+    if not rev.startswith(R_HEADS):
+      return rev
+
     raise GitError('remote %s does not have %s' % (self.name, rev))
 
   def WritesTo(self, ref):
@@ -707,7 +701,7 @@ class Branch(object):
       self._Set('merge', self.merge)
 
     else:
-      fd = open(self._config.file, 'ab')
+      fd = open(self._config.file, 'a')
       try:
         fd.write('[branch "%s"]\n' % self.name)
         if self.remote:
