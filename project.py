@@ -1326,6 +1326,8 @@ class Project(object):
     if not ID_RE.match(self.revisionExpr):
       # in case of manifest sync the revisionExpr might be a SHA1
       branch.merge = self.revisionExpr
+      if not branch.merge.startswith('refs/'):
+        branch.merge = R_HEADS + branch.merge
     branch.Save()
 
     if cnt_mine > 0 and self.rebase:
@@ -1394,6 +1396,8 @@ class Project(object):
     branch = self.GetBranch(name)
     branch.remote = self.GetRemote(self.remote.name)
     branch.merge = self.revisionExpr
+    if not branch.merge.startswith('refs/'):
+      branch.merge = R_HEADS + self.revisionExpr
     revid = self.GetRevisionId(all_refs)
 
     if head.startswith(R_HEADS):
@@ -1849,23 +1853,25 @@ class Project(object):
       spec.append('tag')
       spec.append(tag_name)
 
-    branch = self.revisionExpr
-    if is_sha1 and depth:
-      # Shallow checkout of a specific commit, fetch from that commit and not
-      # the heads only as the commit might be deeper in the history.
-      spec.append(branch)
-    else:
-      if is_sha1:
-        branch = self.upstream
-      if branch is not None and branch.strip():
-        if not branch.startswith('refs/'):
-          branch = R_HEADS + branch
-        spec.append(str((u'+%s:' % branch) + remote.ToLocal(branch)))
+    if not self.manifest.IsMirror:
+      branch = self.revisionExpr
+      if is_sha1 and depth:
+        # Shallow checkout of a specific commit, fetch from that commit and not
+        # the heads only as the commit might be deeper in the history.
+        spec.append(branch)
+      else:
+        if is_sha1:
+          branch = self.upstream
+        if branch is not None and branch.strip():
+          if not branch.startswith('refs/'):
+            branch = R_HEADS + branch
+          spec.append(str((u'+%s:' % branch) + remote.ToLocal(branch)))
     cmd.extend(spec)
 
     shallowfetch = self.config.GetString('repo.shallowfetch')
     if shallowfetch and shallowfetch != ' '.join(spec):
-      GitCommand(self, ['fetch', '--unshallow', name] + shallowfetch.split(),
+      GitCommand(self, ['fetch', '--depth=2147483647', name]
+                 + shallowfetch.split(),
                  bare=True, ssh_proxy=ssh_proxy).Wait()
     if depth:
       self.config.SetString('repo.shallowfetch', ' '.join(spec))
@@ -1874,10 +1880,8 @@ class Project(object):
 
     ok = False
     for _i in range(2):
-      gitcmd = GitCommand(self, cmd, bare=True, capture_stderr=True,
-                          ssh_proxy=ssh_proxy)
+      gitcmd = GitCommand(self, cmd, bare=True, ssh_proxy=ssh_proxy)
       ret = gitcmd.Wait()
-      print(gitcmd.stderr, file=sys.stderr, end='')
       if ret == 0:
         ok = True
         break
@@ -1886,9 +1890,8 @@ class Project(object):
             "error:" in gitcmd.stderr and
             "git remote prune" in gitcmd.stderr):
         prunecmd = GitCommand(self, ['remote', 'prune', name], bare=True,
-                              capture_stderr=True, ssh_proxy=ssh_proxy)
+                              ssh_proxy=ssh_proxy)
         ret = prunecmd.Wait()
-        print(prunecmd.stderr, file=sys.stderr, end='')
         if ret:
           break
         continue
